@@ -12,7 +12,7 @@ from . import agents
 
 gym.register(
     id="Isaac-Kyon-Direct-v0",
-    entry_point="omni.isaac.lab.envs:DirectRLEnv",
+    entry_point=f"{__name__}.kyon_env:KyonEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.kyon_env_cfg:KyonEnvCfg",

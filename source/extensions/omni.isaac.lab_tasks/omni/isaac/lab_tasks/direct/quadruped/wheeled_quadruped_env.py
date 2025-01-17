@@ -7,14 +7,7 @@ from omni.isaac.lab.actuators import ImplicitActuatorCfg
 from omni.isaac.lab.assets import Articulation, ArticulationCfg
 from omni.isaac.lab.envs import DirectRLEnv, DirectRLEnvCfg
 from omni.isaac.lab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from omni.isaac.lab.envs import mdp
 from omni.isaac.lab.scene import InteractiveSceneCfg
-from omni.isaac.lab.managers import EventTermCfg as EventTerm
-from omni.isaac.lab.managers import ObservationGroupCfg as ObsGroup
-from omni.isaac.lab.managers import ObservationTermCfg as ObsTerm
-from omni.isaac.lab.managers import RewardTermCfg as RewTerm
-from omni.isaac.lab.managers import SceneEntityCfg
-from omni.isaac.lab.managers import TerminationTermCfg as DoneTerm
 from omni.isaac.lab.utils import configclass
 
 QUADRUPED_CFG = ArticulationCfg(
@@ -76,7 +69,7 @@ class WheeledQuadrupedEnvCfg(DirectRLEnvCfg):
     """Configuration for the wheeled quadruped environment."""
     # env
     decimation = 2
-    episode_length_s = 5
+    episode_length_s = 20.0
     action_scale = 1.0 # [N]
     action_space = 4
     observation_space = 10
@@ -102,7 +95,7 @@ class WheeledQuadrupedEnvCfg(DirectRLEnvCfg):
     # reward scales
     rew_scale_alive = 1.0
     rew_scale_terminated = -2.0
-    rew_scale_com_height = 1.0
+    rew_scale_com_height = 0.0
 
 class WheeledQuadrupedEnv(DirectRLEnv):
     cfg: WheeledQuadrupedEnvCfg
@@ -145,8 +138,8 @@ class WheeledQuadrupedEnv(DirectRLEnv):
         self._processed_actions = self.cfg.action_scale * self._actions
 
     def _apply_action(self):
-        self.quadruped.set_joint_velocity_target(self._processed_actions, joint_ids=[self._rl_wheel_dof_idx, self._rr_wheel_dof_idx])
-        self.quadruped.set_joint_position_target(self._processed_actions, joint_ids=[self._fl_thigh_dof_idx, self._fr_thigh_dof_idx])
+        self.quadruped.set_joint_velocity_target(self._processed_actions[:, :2].unsqueeze(dim=2), joint_ids=[self._rl_wheel_dof_idx, self._rr_wheel_dof_idx])
+        self.quadruped.set_joint_position_target(self._processed_actions[:, 2:].unsqueeze(dim=2), joint_ids=[self._fl_thigh_dof_idx, self._fr_thigh_dof_idx])
 
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
@@ -174,7 +167,7 @@ class WheeledQuadrupedEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         out_of_bounds = self.base_height < self.cfg.minimum_com_height
-        out_of_bounds = out_of_bounds | torch.acos(-self.quadruped.data.projected_gravity_b[:, 2]).abs() > self.cfg.limit_angle
+        out_of_bounds = out_of_bounds | (torch.acos(-self.quadruped.data.projected_gravity_b[:, 2]).abs() > self.cfg.limit_angle)
         return out_of_bounds, time_out
     
     def _reset_idx(self, env_ids):
@@ -184,9 +177,9 @@ class WheeledQuadrupedEnv(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
-        joint_pos = self.quadruped.data.default_joint_pos(env_ids)
-        joint_vel = self.quadruped.data.default_joint_vel(env_ids)
-        default_root_state = self.quadruped.data.default_root_state(env_ids)
+        joint_pos = self.quadruped.data.default_joint_pos[env_ids]
+        joint_vel = self.quadruped.data.default_joint_vel[env_ids]
+        default_root_state = self.quadruped.data.default_root_state[env_ids]
         default_root_state[:, :3] += self.scene.env_origins[env_ids]
 
         self.base_height[env_ids] = default_root_state[:, 2]
