@@ -38,7 +38,7 @@ from omni.isaac.lab.assets import Articulation
 ##
 # Pre-defined configs
 ##
-from omni.isaac.lab_assets.kyon import KYON_CFG  # isort:skip
+from omni.isaac.lab_assets.kyon import KYON_BASE_CFG  # isort:skip
 
 def design_scene() -> tuple[dict, list[list[float]]]:
     """Designs the scene."""
@@ -50,7 +50,7 @@ def design_scene() -> tuple[dict, list[list[float]]]:
     cfg.func("/World/Light", cfg)
 
     # Kyon robot
-    kyon = Articulation(KYON_CFG.replace(prim_path="/World/Robot"))
+    kyon = Articulation(KYON_BASE_CFG.replace(prim_path="/World/Robot"))
 
     return kyon
 
@@ -82,8 +82,6 @@ def run_simulator(sim: sim_utils.SimulationContext, robot: Articulation):
         joint_pos_target = robot.data.default_joint_pos.clone()
         # apply action to the robot
         robot.set_joint_position_target(joint_pos_target)
-        robot.write_joint_stiffness_to_sim(100.0)
-        robot.write_joint_damping_to_sim(10.0)
         # write data to sim
         robot.write_data_to_sim()
         # perform step

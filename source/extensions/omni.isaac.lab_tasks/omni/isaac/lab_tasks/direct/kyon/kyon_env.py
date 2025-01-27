@@ -6,15 +6,13 @@ import torch
 import omni.isaac.lab.sim as sim_utils
 from omni.isaac.lab.assets import Articulation
 from omni.isaac.lab.envs import DirectRLEnv
-from omni.isaac.lab.sensors import ContactSensor
-from omni.isaac.lab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from omni.isaac.lab.sensors import ContactSensor, RayCaster
 
-from .kyon_env_cfg import KyonEnvCfg
-
+from .kyon_env_cfg import KyonFlatEnvCfg, KyonRoughEnvCfg
 class KyonEnv(DirectRLEnv):
-    cfg: KyonEnvCfg
+    cfg: KyonFlatEnvCfg | KyonRoughEnvCfg
 
-    def __init__(self, cfg: KyonEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: KyonFlatEnvCfg | KyonRoughEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
@@ -43,27 +41,33 @@ class KyonEnv(DirectRLEnv):
         }
 
         # Get specific body indices
-        # self._base_id, _ = self._contact_sensor.find_bodies("base_.*")
-        self._wheel_ids, _ = self._contact_sensor.find_bodies("wheel_.*")
+        self._base_id, _ = self._contact_sensor.find_bodies("pelvis")
+        self._feet_ids, _ = self._contact_sensor.find_bodies("contact_.*")
         self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies("hip_.*")
-        self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies("knee_.*")
+        self._undesired_contact_body_ids.extend(self._contact_sensor.find_bodies("knee_.*")[0])
 
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["kyon"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
-        # add ground plane
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
+        if isinstance(self.cfg, KyonRoughEnvCfg):
+            # we add a height scanner for perceptive locomotion
+            self._height_scanner = RayCaster(self.cfg.height_scanner)
+            self.scene.sensors["height_scanner"] = self._height_scanner
+        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
-        self.scene.filter_collisions(global_prim_paths=[])
+        self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self.kyon.data.default_joint_pos
+        self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
@@ -71,6 +75,10 @@ class KyonEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
         height_data = None
+        if isinstance(self.cfg, KyonRoughEnvCfg):
+            height_data = (
+                self._height_scanner.data.pos_w[:, 2].unsqueeze(1) - self._height_scanner.data.ray_hits_w[..., 2] - 0.5
+            ).clip(-1.0, 1.0)
         obs = torch.cat(
             [
                 tensor
@@ -111,8 +119,9 @@ class KyonEnv(DirectRLEnv):
         # action rate
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         # feet air time
-        first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._wheel_ids]
-        last_air_time = self._contact_sensor.data.last_air_time[:, self._wheel_ids]
+        first_contact = self._contact_sensor.compute_first_contact(self.step_dt)[:, self._feet_ids]
+        # print(f"first_contact: {first_contact}")
+        last_air_time = self._contact_sensor.data.last_air_time[:, self._feet_ids]
         air_time = torch.sum((last_air_time - 0.5) * first_contact, dim=1) * (
             torch.norm(self._commands[:, :2], dim=1) > 0.1
         )
@@ -121,6 +130,7 @@ class KyonEnv(DirectRLEnv):
         is_contact = (
             torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=1)[0] > 1.0
         )
+        # print(f"is_contact: {is_contact}")
         contacts = torch.sum(is_contact, dim=1)
         # flat orientation
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
@@ -164,20 +174,35 @@ class KyonEnv(DirectRLEnv):
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
-        default_root_state = self.kyon.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self.scene.env_origins[env_ids]
+        default_root_state = self._robot.data.default_root_state[env_ids]
+        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
         self._robot.write_root_link_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_com_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
         # Logging
         extras = dict()
+        episodic_total_reward = 0.0
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
+            episodic_total_reward += episodic_sum_avg
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
+        extras["Episode_Reward/total"] = episodic_total_reward / self.max_episode_length_s
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
         extras["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        self.extras["log"].update(extras)
+        extras = dict()
+        extras["rew_scale_lin_vel"] = self.cfg.rew_scale_lin_vel
+        extras["rew_scale_yaw_rate"] = self.cfg.rew_scale_yaw_rate
+        extras["rew_scale_z_vel"] = self.cfg.rew_scale_z_vel
+        extras["rew_scale_ang_vel"] = self.cfg.rew_scale_ang_vel
+        extras["rew_scale_joint_torque"] = self.cfg.rew_scale_joint_torque
+        extras["rew_scale_joint_acc"] = self.cfg.rew_scale_joint_acc
+        extras["rew_scale_action_rate"] = self.cfg.rew_scale_action_rate
+        extras["rew_scale_feet_air_time"] = self.cfg.rew_scale_feet_air_time
+        extras["rew_scale_undesired_contact"] = self.cfg.rew_scale_undesired_contact
+        extras["rew_scale_flat_orientation"] = self.cfg.rew_scale_flat_orientation
         self.extras["log"].update(extras)
