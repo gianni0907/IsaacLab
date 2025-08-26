@@ -13,7 +13,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass
+from isaaclab.utils import configclass, noise
 
 ##
 # Pre-defined configs
@@ -57,7 +57,7 @@ class AnymalCFlatEnvCfg(DirectRLEnvCfg):
     action_scale = 0.5
     action_space = 12
     observation_space = 48
-    state_space = 0
+    state_space = 48
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
